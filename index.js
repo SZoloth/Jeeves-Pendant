@@ -1,6 +1,5 @@
 import fetch from "node-fetch";
 import fs from "node:fs/promises";
-import { createGraphClient } from "@roam-research/roam-api-sdk";
 
 // ---------- load or init cursor ----------
 const CURSOR = "cursor.json";
@@ -35,16 +34,31 @@ const todayUid = new Intl.DateTimeFormat("en-CA", {
   .format(new Date())
   .replace(/-/g, "");           // YYYYMMDD
 
-await client.write({
-  operations: [
-    {
-      action: "create-block",
-      location: { "parent-uid": todayUid, order: "last" },
-      block: { string: `**${log.title}**\n\n${log.markdown}` },
+// ------------ write to Roam via backend API ------------
+const roamResp = await fetch(
+  `https://api.roamresearch.com/api/graph/${process.env.GRAPH_NAME}/write`,
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.ROAM_API_TOKEN}`,
     },
-  ],
-});
+    body: JSON.stringify({
+      operations: [
+        {
+          action: "create-block",
+          location: { "parent-uid": "today", order: "last" },
+          block: { string: `**${log.title}**\n\n${log.markdown}` },
+        },
+      ],
+    }),
+  }
+);
 
+if (!roamResp.ok) {
+  console.error("Roam write failed", await roamResp.text());
+  process.exit(1);
+}
 console.log("Uploaded lifelog", log.id);
 
 // ---------- persist new cursor ----------
