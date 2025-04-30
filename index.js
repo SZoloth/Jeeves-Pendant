@@ -1,66 +1,88 @@
 import fetch from "node-fetch";
 import fs from "node:fs/promises";
 
-/* ENV: LIMITLESS_API_KEY, ROAM_API_TOKEN, GRAPH_NAME */
-const CURSOR = "cursor.json";
-const TZ     = "America/Denver";
+/* secrets ------------------------------------------------- */
+const LIMITLESS = process.env.LIMITLESS_API_KEY;   // pendant
+const ROAM_TOKEN = process.env.ROAM_API_TOKEN;     // graph API token
+const GRAPH = process.env.GRAPH_NAME;              // e.g. "jeeves-pendant"
 
-/* helpers */
-const today = () =>
+/* misc ---------------------------------------------------- */
+const CURSOR = "cursor.json";
+const TZ = "America/Denver";
+
+const todayTitle = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: TZ }); // 2025-04-30
 
-const readCur = async () => {
-  try { return JSON.parse(await fs.readFile(CURSOR,"utf8")); }
-  catch { return { lastId:"", lastEnd:"1970-01-01T00:00:00Z" }; }
+const readCursor = async () => {
+  try { return JSON.parse(await fs.readFile(CURSOR, "utf8")); }
+  catch { return { lastId: "", lastEnd: "1970-01-01T00:00:00Z" }; }
 };
-const saveCur = (c)=>fs.writeFile(CURSOR,JSON.stringify(c));
+const saveCursor = (c) => fs.writeFile(CURSOR, JSON.stringify(c, null, 0));
 
-const j = async (r,tag)=>{
-  const t=await r.text();
-  if(!r.ok) throw new Error(`${tag} → ${r.status}: ${t.slice(0,200)}`);
-  return t?JSON.parse(t):null;
+const getJSON = async (res, tag) => {
+  const txt = await res.text();
+  if (!res.ok) throw new Error(`${tag} → HTTP ${res.status}: ${txt.slice(0,200)}`);
+  return txt ? JSON.parse(txt) : null;
 };
 
-/* 1 ─ newest lifelog */
-const cur = await readCur();
-const ll  = await j(
-  await fetch(
-    `https://api.limitless.ai/v1/lifelogs?start=${encodeURIComponent(cur.lastEnd)}&limit=1&direction=asc&includeMarkdown=true`,
-    { headers:{ "X-API-Key": process.env.LIMITLESS_API_KEY } }
-  ),
+/* 1 ─ pull newest lifelog --------------------------------- */
+const cur = await readCursor();
+
+const llURL = `https://api.limitless.ai/v1/lifelogs?start=${encodeURIComponent(
+  cur.lastEnd
+)}&limit=1&direction=asc&includeMarkdown=true`;
+
+const ll = await getJSON(
+  await fetch(llURL, { headers: { "X-API-Key": LIMITLESS } }),
   "Limitless"
 );
 
 const log = ll?.data?.lifelogs?.[0];
-if(!log)                   { console.log("No new lifelog"); process.exit(0); }
-if(log.id===cur.lastId)    { console.log("Duplicate");       process.exit(0); }
+if (!log)                  { console.log("No new lifelog"); process.exit(0); }
+if (log.id === cur.lastId) { console.log("Duplicate lifelog"); process.exit(0); }
 
-/* 2 ─ shard URL */
-const root  = `https://api.roamresearch.com/api/graph/${process.env.GRAPH_NAME}/write`;
-const shard = (await fetch(root,{method:"POST",redirect:"manual"}))
-                .headers.get("location");
-if(!shard) throw new Error("Roam redirect missing Location");
+/* 2 ─ ensure today’s page exists (POST /page) -------------- */
+const pageRes = await getJSON(
+  await fetch(`https://api.roamresearch.com/api/graph/${GRAPH}/page`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${ROAM_TOKEN}`
+    },
+    body: JSON.stringify({ page: { title: todayTitle() } })
+  }),
+  "create page"
+);
+/* pageRes.uid is the same as the title (for daily pages), but keep anyway */
+const pageUid = pageRes.uid ?? todayTitle();
 
-const hdr={ "Content-Type":"application/json",
-            Authorization:`Bearer ${process.env.ROAM_API_TOKEN}` };
+/* 3 ─ discover shard for /write ---------------------------- */
+const root = `https://api.roamresearch.com/api/graph/${GRAPH}/write`;
+const shardURL = (await fetch(root, { method: "POST", redirect: "manual" }))
+                   .headers.get("location");
+if (!shardURL) throw new Error("Missing shard redirect");
 
-/* 3 ─ operations wrapped in vectors */
-const body={
-  operations:[
-    [ { "create-page":  { "title": today() } } ],
-    [ { "create-block": {
-          "location":{ "parent-uid": today(), "order":"last" },
-          "string":`**${log.title}**\n\n${log.markdown}`
-        } } ]
-  ]
+const auth = {
+  "Content-Type": "application/json",
+  Authorization: `Bearer ${ROAM_TOKEN}`
 };
 
-await j(
-  await fetch(shard,{method:"POST",headers:hdr,body:JSON.stringify(body)}),
-  "Roam write"
+/* 4 ─ append block (array payload) ------------------------- */
+const ops = [
+  {
+    "create-block": {
+      "location": { "parent-uid": pageUid, "order": "last" },
+      "string": `**${log.title}**\n\n${log.markdown}`
+    }
+  }
+];
+
+await getJSON(
+  await fetch(shardURL, { method: "POST", headers: auth, body: JSON.stringify(ops) }),
+  "write"
 );
 
-console.log("Uploaded",log.id);
+console.log("Uploaded lifelog", log.id);
 
-/* 4 ─ cursor */
-await saveCur({ lastId: log.id, lastEnd: log.endTime });
+/* 5 ─ update cursor --------------------------------------- */
+await saveCursor({ lastId: log.id, lastEnd: log.endTime });
